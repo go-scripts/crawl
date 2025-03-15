@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/log"
 	"github.com/chromedp/chromedp"
 )
 
@@ -21,6 +21,7 @@ type ExtractedContent struct {
 	HTML       string            `json:"html,omitempty"`
 	Text       string            `json:"text,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
+	Return     string            `json:"return,omitempty"`
 }
 
 // ScrapedData represents the structure of the scraped content
@@ -29,6 +30,7 @@ type ScrapedData struct {
 	Title     string                        `json:"title"`
 	Selectors map[string][]ExtractedContent `json:"selectors"`
 	Links     []string                      `json:"links"`
+	Console   ExtractedContent              `json:"console"`
 }
 
 // Configuration holds all the settings for the crawler
@@ -45,6 +47,7 @@ type Configuration struct {
 	Timeout        time.Duration
 	ExecuteJS      bool
 	WaitTime       time.Duration
+	Script         string
 }
 
 // Queue for URLs to be processed
@@ -56,6 +59,50 @@ type Queue struct {
 type FileWriter struct {
 	outputDir string
 	mu        sync.Mutex
+}
+
+func NewFileWriter(outputDir string) (*FileWriter, error) {
+	// Create output directory if it doesn't exist
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return nil, fmt.Errorf("error creating output directory: %v", err)
+	}
+
+	return &FileWriter{
+		outputDir: outputDir,
+	}, nil
+}
+
+func (fw *FileWriter) WriteURLData(data ScrapedData) error {
+	// Create a safe filename from URL
+	u, err := url.Parse(data.URL)
+	if err != nil {
+		return err
+	}
+
+	filename := fmt.Sprintf("%s_%s.json",
+		u.Hostname(),
+		strings.ReplaceAll(strings.Trim(u.Path, "/"), "/", "_"))
+
+	if filename == "" || filename == "_" {
+		filename = "index"
+	}
+
+	// Add timestamp to ensure uniqueness
+	filename = fmt.Sprintf("%d_%s", time.Now().UnixNano(), filename)
+
+	fullPath := filepath.Join(fw.outputDir, filename)
+
+	// Serialize the data to JSON
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	// Lock to prevent concurrent file access issues
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+
+	return os.WriteFile(fullPath, jsonData, 0644)
 }
 
 func (q *Queue) Push(url string) {
@@ -188,41 +235,38 @@ func (c *Crawler) normalizeURL(baseURL, href string) (string, error) {
 
 // getAttributes extracts attributes from an element using JavaScript
 func getAttributesJS(attributeNames []string) string {
-	if len(attributeNames) == 0 {
-		// Default common attributes
-		attributeNames = []string{"id", "class", "href", "src", "alt", "title"}
-	}
+	// if len(attributeNames) == 0 {
+	// 	// Default common attributes
+	// 	attributeNames = []string{"id", "class", "href", "src", "alt", "title"}
+	// }
 
 	attrNamesJSON, _ := json.Marshal(attributeNames)
 
-	// JavaScript to extract attributes
-	script := fmt.Sprintf(`
-	function getAttributes(element, attrNames) {
-		const result = {};
-		const attrs = %s;
-		
-		if (attrs.length === 0) {
-			// Get all attributes
-			for (let i = 0; i < element.attributes.length; i++) {
-				const attr = element.attributes[i];
-				result[attr.name] = attr.value;
-			}
-		} else {
-			// Get only specified attributes
-			for (const attrName of attrs) {
-				if (element.hasAttribute(attrName)) {
-					result[attrName] = element.getAttribute(attrName);
-				}
-			}
-		}
-		
-		return result;
-	}
-	
-	return getAttributes(this, %s);
-	`, attrNamesJSON, attrNamesJSON)
+	return fmt.Sprintf(`
+    function(el) {
+        const result = {};
+        const attrs = %s;
 
-	return script
+        // Handle case where no attributes are specified
+        if (!attrs || attrs.length === 0) {
+            // Get all attributes, but first check if element has attributes
+            if (el && el.attributes) {
+                for (let i = 0; i < el.attributes.length; i++) {
+                    const attr = el.attributes[i];
+                    result[attr.name] = attr.value;
+                }
+            }
+        } else {
+            // Get only specified attributes
+            for (const attrName of attrs) {
+                if (el && el.hasAttribute(attrName)) {
+                    result[attrName] = el.getAttribute(attrName);
+                }
+            }
+        }
+
+        return result;
+    }`, attrNamesJSON)
 }
 
 func (c *Crawler) scrape(targetURL string) {
@@ -295,24 +339,21 @@ func (c *Crawler) scrape(targetURL string) {
 		var nodesJSON string
 		jsSelector := fmt.Sprintf(`
 		(() => {
-			try {
-				const elements = Array.from(document.querySelectorAll(%q));
-				return JSON.stringify(elements.map(el => ({
-					html: el.outerHTML,
+			const elements = document.querySelectorAll(%q);
+			const getAttrs = %s;
+			const results = [];
+			
+			elements.forEach(el => {
+				results.push({
+					html: el.innerHTML,
 					text: el.textContent.trim(),
-					attributes: (() => {
-						const attrs = {};
-						for (const attr of el.attributes) {
-							attrs[attr.name] = attr.value;
-						}
-						return attrs;
-					})()
-				})));
-			} catch(e) {
-				return "[]";
-			}
+					attributes: getAttrs(el)
+				});
+			});
+			
+			return JSON.stringify(results);
 		})()
-		`, selector)
+		`, selector, getAttributesJS(c.config.AttributeNames))
 
 		err := chromedp.Run(timeoutCtx, chromedp.Evaluate(jsSelector, &nodesJSON))
 
@@ -355,6 +396,19 @@ func (c *Crawler) scrape(targetURL string) {
 		}
 	}
 
+	var extractedConsole ExtractedContent
+	if c.config.Script != "" {
+		var nodesScriptJSON string
+		err := chromedp.Run(timeoutCtx, chromedp.Evaluate(c.config.Script, &nodesScriptJSON))
+		if err != nil && c.config.Verbose {
+			fmt.Printf("Error parsing selector results for %v => %s ([ERROR:] %v)\n", c.config.Script, nodesScriptJSON, err)
+		} else {
+			extractedConsole = ExtractedContent{
+				Return: nodesScriptJSON,
+			}
+		}
+	}
+
 	// Extract links
 	jsLinks := `
 	(() => {
@@ -390,12 +444,12 @@ func (c *Crawler) scrape(targetURL string) {
 		}
 	}
 
-	// After collecting all data for the page
 	scrapedData := ScrapedData{
 		URL:       targetURL,
 		Title:     pageTitle,
 		Selectors: selectorResults,
 		Links:     filteredLinks,
+		Console:   extractedConsole,
 	}
 
 	// Write this data to its own file immediately
@@ -492,50 +546,6 @@ func (c *Crawler) Run() error {
 	return nil
 }
 
-func NewFileWriter(outputDir string) (*FileWriter, error) {
-	// Create output directory if it doesn't exist
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return nil, fmt.Errorf("error creating output directory: %v", err)
-	}
-
-	return &FileWriter{
-		outputDir: outputDir,
-	}, nil
-}
-
-func (fw *FileWriter) WriteURLData(data ScrapedData) error {
-	// Create a safe filename from URL
-	u, err := url.Parse(data.URL)
-	if err != nil {
-		return err
-	}
-
-	filename := fmt.Sprintf("%s_%s.json",
-		u.Hostname(),
-		strings.ReplaceAll(strings.Trim(u.Path, "/"), "/", "_"))
-
-	if filename == "" || filename == "_" {
-		filename = "index"
-	}
-
-	// Add timestamp to ensure uniqueness
-	filename = fmt.Sprintf("%d_%s", time.Now().UnixNano(), filename)
-
-	fullPath := filepath.Join(fw.outputDir, filename)
-
-	// Serialize the data to JSON
-	jsonData, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	// Lock to prevent concurrent file access issues
-	fw.mu.Lock()
-	defer fw.mu.Unlock()
-
-	return os.WriteFile(fullPath, jsonData, 0644)
-}
-
 func main() {
 	// Parse command line flags
 	startURL := flag.String("url", "", "Starting URL to crawl (required)")
@@ -545,10 +555,11 @@ func main() {
 	concurrency := flag.Int("concurrency", 3, "Maximum number of concurrent requests")
 	waitTime := flag.Duration("wait", 2*time.Second, "Time to wait after page load for JavaScript execution")
 	timeout := flag.Duration("timeout", *waitTime+60*time.Second, "HTTP request timeout")
-	selectorsFlag := flag.String("selectors", "h1,h2,p", "CSS selectors separated by comma")
+	selectorsFlag := flag.String("selectors", "h1,h2", "CSS selectors separated by comma")
 	attributesFlag := flag.String("attributes", "", "Attributes to extract (comma separated). If empty, extracts common attributes")
 	excludePathFlag := flag.String("exclude", "", "Exclude URLs containing these paths (comma separated)")
-	executeJS := flag.Bool("execute-js", true, "Execute JavaScript on the page")
+	executeJS := flag.Bool("execute-js", false, "Execute JavaScript on the page")
+	script := flag.String("script", "", "Execute script JavaScript on the page")
 
 	flag.Parse()
 
@@ -589,7 +600,7 @@ func main() {
 		}
 	}
 
-	// Configure and run the crawler with error handling for the new constructor
+	// Configure and run the crawler
 	config := Configuration{
 		StartURL:       *startURL,
 		OutputFile:     *outputFile,
@@ -602,6 +613,7 @@ func main() {
 		Timeout:        *timeout,
 		ExecuteJS:      *executeJS,
 		WaitTime:       *waitTime,
+		Script:         *script,
 	}
 
 	crawler, err := NewCrawler(config)
