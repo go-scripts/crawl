@@ -6,6 +6,17 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// ScrapedData represents the data extracted from a crawled page
+type ScrapedData struct {
+    URL         string                        `json:"url"`
+    Title       string                        `json:"title"`
+    Links       []string                      `json:"links"`
+    StatusCode  int                           `json:"status_code"`
+    ContentType string                        `json:"content_type"`
+    Selectors   map[string][]ExtractedContent `json:"selectors"`
+    Console     ExtractedContent              `json:"console"`
+}
+
 // Base component interface
 type Component interface {
 	Init() tea.Cmd
@@ -142,9 +153,11 @@ func (q *QueuePanel) Update(msg tea.Msg) (Component, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
-			cmd = q.queue.list.PrevItem
+			q.queue.list.CursorUp()
+			return q, nil
 		case "down", "j":
-			cmd = q.queue.list.NextItem
+			q.queue.list.CursorDown()
+			return q, nil
 		}
 	}
 
@@ -175,15 +188,6 @@ func (q *QueuePanel) MarkURLProcessed(url string) {
 // Clear empties the queue
 func (q *QueuePanel) Clear() {
 	q.queue.Clear()
-}
-
-type CrawlResult struct {
-	URL        string
-	Title      string
-	StatusCode int
-	Links      int
-	Type       string
-	Error      string
 }
 
 type ResultsPanel struct {
@@ -423,6 +427,13 @@ func (l *Layout) AddResult(result CrawlResult) {
 	if rp, ok := l.results.(*ResultsPanel); ok {
 		rp.AddResult(result)
 	}
+}
+
+type ExtractedContent struct {
+	HTML       string            `json:"html,omitempty"`
+	Text       string            `json:"text,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+	Return     string            `json:"return,omitempty"`
 }
 
 // AddCrawlResult is a convenience method that creates a CrawlResult from scraped data

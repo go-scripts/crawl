@@ -21,7 +21,8 @@ type ScrapedData struct {
 	Selectors  map[string][]ExtractedContent `json:"selectors"`
 	Links      []string                      `json:"links"`
 	Console    ExtractedContent              `json:"console"`
-	StatusCode int                           `json:"status_code"`
+	StatusCode  int                           `json:"status_code"`
+	ContentType string                        `json:"content_type"`
 }
 
 // Configuration holds all the settings for the crawler

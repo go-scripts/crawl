@@ -91,7 +91,7 @@ func (t *ResultsTable) View() string {
 	// Calculate column widths
 	urlWidth := min(40, t.width/3)
 	titleWidth := min(30, t.width/4)
-	statsWidth := min(20, t.width/6)
+	// statsWidth := min(20, t.width/6)
 
 	// Build header
 	header := t.headerStyle.Render(fmt.Sprintf(

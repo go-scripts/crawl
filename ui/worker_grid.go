@@ -83,7 +83,11 @@ func (g *WorkerGrid) Update(msg tea.Msg) tea.Cmd {
 	for i := range g.workers {
 		if g.workers[i].active {
 			cmd := g.workers[i].spinner.Tick()
-			cmds = append(cmds, cmd)
+			if cmd != nil {
+				if cmdAsTeaCmd, ok := cmd.(tea.Cmd); ok {
+					cmds = append(cmds, cmdAsTeaCmd)
+				}
+			}
 		}
 	}
 

@@ -43,9 +43,7 @@ func NewQueueList() *QueueList {
 
 	l := list.New([]list.Item{}, delegate, 0, 0)
 	l.Title = "URL Queue"
-	l.Styles.Title = titleStyle
-	l.StatusMessageStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240"))
+	l.Styles.Title = l.Styles.Title.Foreground(lipgloss.Color("240"))
 
 	return &QueueList{
 		list:      l,
@@ -70,9 +68,8 @@ func (q *QueueList) Update(msg tea.Msg) tea.Cmd {
 
 // View renders the component
 func (q *QueueList) View() string {
-	stats := fmt.Sprintf("Queue Stats: %d/%d processed", q.processed, q.total)
-	q.list.StatusMessageStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	q.list.SetStatusMessage(stats)
+	// Modern bubble tea versions use SetFilteringEnabled and Styles for status messages
+	q.list.SetFilteringEnabled(false)
 	return q.list.View()
 }
 
