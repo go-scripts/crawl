@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/briandowns/spinner"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/log"
 	"github.com/chromedp/chromedp"
 )
@@ -53,99 +53,20 @@ type Configuration struct {
 
 // Queue for URLs to be processed
 type Queue struct {
-	items         []string
-	mu            sync.Mutex
-	spinners      []*spinner.Spinner
-	spinnerStatus []bool   // true if in use
-	spinnerURLs   []string // URL associated with each spinner
-	spinnerMu     sync.Mutex
+	items []string
+	mu    sync.Mutex
 }
 
-// FileWriter handles writing scraped data to files
 type FileWriter struct {
 	outputDir string
 	mu        sync.Mutex
 }
 
-func (q *Queue) HandleError(urlStr string, err error, errorMessage string) {
-	// Skip JavaScript execution errors to reduce noise
-	if strings.Contains(strings.ToLower(errorMessage), "script") ||
-		strings.Contains(strings.ToLower(errorMessage), "javascript") ||
-		strings.Contains(strings.ToLower(errorMessage), "execute") {
-		return
-	}
-
-	if errorMessage == "" {
-		errorMessage = "Error"
-	}
-
-	// Create a clean error message with context
-	fullMessage := fmt.Sprintf("Error processing %s: %s (%v)",
-		formatSpinnerMessage(urlStr),
-		errorMessage,
-		err)
-
-	fmt.Printf("\n%s\n", fullMessage)
-	log.Error(fullMessage)
-
-	// Show condensed error in spinner
-	shortMsg := fmt.Sprintf("ERROR: %s", errorMessage)
-	if len(shortMsg) > 50 {
-		shortMsg = shortMsg[:47] + "..."
-	}
-	q.UpdateSpinnerMessage(urlStr, shortMsg)
-}
-func (q *Queue) UpdateSpinnerMessage(urlStr string, message string) {
-	q.spinnerMu.Lock()
-	defer q.spinnerMu.Unlock()
-
-	for i, spinnerURL := range q.spinnerURLs {
-		if spinnerURL == urlStr {
-			// Format: [ID] URL (truncated) STATUS
-			msg := fmt.Sprintf(" [%d] %s", i, formatSpinnerMessage(urlStr))
-			if message != "" {
-				msg += fmt.Sprintf("\n    → %s", message)
-			}
-			q.spinners[i].Suffix = msg
-			break
-		}
-	}
-}
-
-func (q *Queue) Push(url string) {
-	q.mu.Lock()
-	q.items = append(q.items, url)
-	q.mu.Unlock()
-
-	q.spinnerMu.Lock()
-	defer q.spinnerMu.Unlock()
-
-	// Find an available spinner
-	spinnerID := -1
-	for i, inUse := range q.spinnerStatus {
-		if !inUse {
-			spinnerID = i
-			break
-		}
-	}
-
-	if spinnerID != -1 {
-		q.spinnerStatus[spinnerID] = true
-		q.spinnerURLs[spinnerID] = url
-		q.spinners[spinnerID].Suffix = fmt.Sprintf(" [%d] %s", spinnerID, formatSpinnerMessage(url))
-		q.spinners[spinnerID].Start()
-	} else if len(q.spinnerStatus) > 0 {
-		// If no spinner is available, use the first one
-		spinnerID = 0
-		q.spinnerURLs[spinnerID] = url
-		q.spinners[spinnerID].Suffix = fmt.Sprintf(" [%d] %s", spinnerID, formatSpinnerMessage(url))
-	}
-}
-
 func NewFileWriter(outputDir string) (*FileWriter, error) {
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return nil, fmt.Errorf("error creating output directory: %v", err)
+		log.Error("error creating output directory", "err", err)
+		return nil, err
 	}
 
 	return &FileWriter{
@@ -157,6 +78,7 @@ func (fw *FileWriter) WriteURLData(data ScrapedData) error {
 	// Create a safe filename from URL
 	u, err := url.Parse(data.URL)
 	if err != nil {
+		log.Error("Failed to parse URL for file name", "url", data.URL, "error", err)
 		return err
 	}
 
@@ -176,6 +98,7 @@ func (fw *FileWriter) WriteURLData(data ScrapedData) error {
 	// Serialize the data to JSON
 	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
+		log.Error("Failed to marshal URL data to JSON", "url", data.URL, "error", err)
 		return err
 	}
 
@@ -183,53 +106,31 @@ func (fw *FileWriter) WriteURLData(data ScrapedData) error {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 
-	return os.WriteFile(fullPath, jsonData, 0644)
+	if err := os.WriteFile(fullPath, jsonData, 0644); err != nil {
+		log.Error("Failed to write URL data to file", "url", data.URL, "file", fullPath, "error", err)
+		return err
+	}
+
+	log.Info("Successfully wrote URL data", "url", data.URL, "file", fullPath)
+	return nil
 }
 
-// Helper method for formatting URLs in spinner messages
-func formatSpinnerMessage(urlStr string) string {
-	// Truncate URL if too long
-	maxLen := 40
-	if len(urlStr) > maxLen {
-		// Keep the protocol and domain, then truncate the path
-		u, err := url.Parse(urlStr)
-		if err == nil {
-			domain := u.Host
-			path := u.Path
-			if len(path) > maxLen-len(domain)-3 {
-				path = "..." + path[len(path)-(maxLen-len(domain)-3):]
-			}
-			return domain + path
-		}
-		return "..." + urlStr[len(urlStr)-maxLen:]
-	}
-	return urlStr
+func (q *Queue) Push(url string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.items = append(q.items, url)
 }
 
 func (q *Queue) Pop() (string, bool) {
 	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if len(q.items) == 0 {
-		q.mu.Unlock()
 		return "", false
 	}
 
 	item := q.items[0]
 	q.items = q.items[1:]
-	q.mu.Unlock()
-
-	q.spinnerMu.Lock()
-	defer q.spinnerMu.Unlock()
-
-	// Find and release the spinner
-	for i, url := range q.spinnerURLs {
-		if url == item {
-			q.spinners[i].Stop()
-			q.spinnerStatus[i] = false
-			q.spinnerURLs[i] = ""
-			break
-		}
-	}
-
 	return item, true
 }
 
@@ -270,23 +171,11 @@ func NewCrawler(config Configuration) (*Crawler, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Initialize spinners based on concurrency
-	spinners := make([]*spinner.Spinner, config.Concurrency)
-	spinnerStatus := make([]bool, config.Concurrency)
-	spinnerURLs := make([]string, config.Concurrency)
-
-	for i := 0; i < config.Concurrency; i++ {
-		spinners[i] = spinner.New(spinner.CharSets[9], 100*time.Millisecond)
-	}
 
 	return &Crawler{
-		config:  config,
-		visited: make(map[string]bool),
-		queue: Queue{
-			spinners:      spinners,
-			spinnerStatus: spinnerStatus,
-			spinnerURLs:   spinnerURLs,
-		},
+		config:        config,
+		visited:       make(map[string]bool),
+		queue:         Queue{},
 		browserCtx:    browserCtx,
 		browserCancel: browserCancel,
 		fileWriter:    fileWriter,
@@ -399,6 +288,10 @@ func (c *Crawler) scrape(targetURL string) {
 
 	c.markVisited(targetURL)
 
+	if c.config.Verbose {
+		log.Debug("Scraping URL", "url", targetURL)
+	}
+
 	// Create a context for this browser tab
 	tabCtx, cancel := chromedp.NewContext(c.browserCtx)
 	defer cancel()
@@ -426,19 +319,25 @@ func (c *Crawler) scrape(targetURL string) {
 
 	// Execute navigation
 	if err := chromedp.Run(timeoutCtx, tasks...); err != nil {
-		c.queue.HandleError(targetURL, err, "Navigation failed")
+		if c.config.Verbose {
+			log.Error("Navigation failed", "url", targetURL, "error", err)
+		}
 		return
 	}
 
 	// Get page title
 	if err := chromedp.Run(timeoutCtx, chromedp.Title(&pageTitle)); err != nil {
-		c.queue.HandleError(targetURL, err, "Error getting title")
+		if c.config.Verbose {
+			log.Error("Failed to get page title", "url", targetURL, "error", err)
+		}
 		// Continue anyway, title is not critical
 	}
 
 	// Get full page HTML
 	if err := chromedp.Run(timeoutCtx, chromedp.OuterHTML("html", &pageHTML)); err != nil {
-		c.queue.HandleError(targetURL, err, "Error getting HTML")
+		if c.config.Verbose {
+			log.Error("Failed to get page HTML", "url", targetURL, "error", err)
+		}
 		return
 	}
 
@@ -469,14 +368,18 @@ func (c *Crawler) scrape(targetURL string) {
 		err := chromedp.Run(timeoutCtx, chromedp.Evaluate(jsSelector, &nodesJSON))
 
 		if err != nil {
-			c.queue.HandleError(targetURL, err, fmt.Sprintf("Error executing query for selector %s", selector))
+			if c.config.Verbose {
+				log.Error("Failed to execute selector query", "url", targetURL, "selector", selector, "error", err)
+			}
 			continue
 		}
 
 		// Parse results
 		var extractedData []map[string]interface{}
 		if err := json.Unmarshal([]byte(nodesJSON), &extractedData); err != nil {
-			c.queue.HandleError(targetURL, err, fmt.Sprintf("Error parsing selector results for %s", selector))
+			if c.config.Verbose {
+				log.Error("Failed to parse selector results", "url", targetURL, "selector", selector, "error", err)
+			}
 			continue
 		}
 
@@ -505,10 +408,11 @@ func (c *Crawler) scrape(targetURL string) {
 
 	var extractedConsole ExtractedContent
 	if c.config.Script != "" {
+		log.Debug("Executing custom script", "url", targetURL)
 		var nodesScriptJSON string
 		err := chromedp.Run(timeoutCtx, chromedp.Evaluate(c.config.Script, &nodesScriptJSON))
-		if err != nil {
-			c.queue.HandleError(targetURL, err, fmt.Sprintf("Error executing script %s", c.config.Script))
+		if err != nil && c.config.Verbose {
+			log.Error("Script execution failed", "url", targetURL, "error", err)
 		} else {
 			extractedConsole = ExtractedContent{
 				Return: nodesScriptJSON,
@@ -532,7 +436,9 @@ func (c *Crawler) scrape(targetURL string) {
 
 	err := chromedp.Run(timeoutCtx, chromedp.Evaluate(jsLinks, &links))
 	if err != nil {
-		c.queue.HandleError(targetURL, err, "Error extracting links")
+		if c.config.Verbose {
+			log.Error("Failed to extract links", "url", targetURL, "error", err)
+		}
 		// Continue with no links
 		links = []string{}
 	}
@@ -559,7 +465,9 @@ func (c *Crawler) scrape(targetURL string) {
 
 	// Write this data to its own file immediately
 	if err := c.fileWriter.WriteURLData(scrapedData); err != nil {
-		c.queue.HandleError(targetURL, err, "Error writing data")
+		if c.config.Verbose {
+			log.Error("Failed to write URL data", "url", targetURL, "error", err)
+		}
 	}
 
 	// Still add to results for final combined output if needed
@@ -570,24 +478,20 @@ func (c *Crawler) Run() error {
 	// Parse domain from start URL
 	startURL, err := url.Parse(c.config.StartURL)
 	if err != nil {
-		return fmt.Errorf("invalid start URL: %v", err)
+		log.Error("invalid start URL", "err", err)
+		return err
 	}
 
 	c.config.Domain = startURL.Hostname()
 
 	if c.config.Verbose {
-		fmt.Printf("Starting crawl from %s (domain: %s)\n", c.config.StartURL, c.config.Domain)
-		fmt.Printf("Using selectors: %v\n", c.config.Selectors)
-		fmt.Printf("JavaScript execution: %v\n", c.config.ExecuteJS)
-		if c.config.WaitTime > 0 {
-			fmt.Printf("Wait time after page load: %v\n", c.config.WaitTime)
-		}
-		if len(c.config.AttributeNames) > 0 {
-			fmt.Printf("Extracting attributes: %v\n", c.config.AttributeNames)
-		}
-		if len(c.config.ExcludePath) > 0 {
-			fmt.Printf("Excluding paths containing: %v\n", c.config.ExcludePath)
-		}
+		log.Info("Starting crawl", "url", c.config.StartURL, "domain", c.config.Domain)
+		log.Debug("Configuration details",
+			"selectors", c.config.Selectors,
+			"js_enabled", c.config.ExecuteJS,
+			"wait_time", c.config.WaitTime,
+			"attributes", c.config.AttributeNames,
+			"exclusions", c.config.ExcludePath)
 	}
 
 	// Start with the first URL
@@ -608,7 +512,7 @@ func (c *Crawler) Run() error {
 		}
 
 		if c.config.Verbose {
-			fmt.Printf("Processing depth %d with %d URLs\n", depth, len(levelURLs))
+			log.Info("Processing URLs at depth", "depth", depth, "url_count", len(levelURLs))
 		}
 
 		// Process all URLs at this depth with limited concurrency
@@ -632,24 +536,43 @@ func (c *Crawler) Run() error {
 	// Write results to JSON file
 	file, err := os.Create(c.config.OutputFile)
 	if err != nil {
-		return fmt.Errorf("error creating output file: %v", err)
+		log.Error("error creating output file", "err", err)
+		return err
 	}
 	defer file.Close()
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(c.results); err != nil {
-		return fmt.Errorf("error encoding results to JSON: %v", err)
+		log.Error("error encoding results to JSON", "err", err)
+		return err
 	}
 
 	if c.config.Verbose {
-		fmt.Printf("Crawl completed. Visited %d pages. Results saved to %s\n", len(c.visited), c.config.OutputFile)
+		log.Info("Crawl completed successfully",
+			"visited_pages", len(c.visited),
+			"output_file", c.config.OutputFile)
 	}
 
 	return nil
 }
 
 func main() {
+	// Set log format to JSON
+	log.SetFormatter(log.TextFormatter)
+	log.SetLevel(log.DebugLevel)
+	styles := log.DefaultStyles()
+	styles.Levels[log.ErrorLevel] = lipgloss.NewStyle().
+		SetString("ERROR!!").
+		Padding(0, 1, 0, 1).
+		Background(lipgloss.Color("204")).
+		Foreground(lipgloss.Color("0"))
+	// Add a custom style for key `err`
+	styles.Keys["err"] = lipgloss.NewStyle().Foreground(lipgloss.Color("204"))
+	styles.Values["err"] = lipgloss.NewStyle().Bold(true)
+	log := log.New(os.Stderr)
+	log.SetStyles(styles)
+
 	// Parse command line flags
 	startURL := flag.String("url", "", "Starting URL to crawl (required)")
 	outputFile := flag.String("output", "scrape_results.json", "Output JSON file name")
@@ -699,7 +622,8 @@ func main() {
 	outputDir := filepath.Dir(*outputFile)
 	if outputDir != "." {
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			log.Fatalf("Error creating output directory: %v", err)
+			log.Error("Failed to create output directory", "error", err)
+			os.Exit(1)
 		}
 	}
 
@@ -721,11 +645,13 @@ func main() {
 
 	crawler, err := NewCrawler(config)
 	if err != nil {
-		log.Fatalf("Failed to initialize crawler: %v", err)
+		log.Error("Failed to initialize crawler", "error", err)
+		os.Exit(1)
 	}
 	defer crawler.Close() // Ensure browser resources are cleaned up
 
 	if err := crawler.Run(); err != nil {
-		log.Fatalf("Crawler error: %v", err)
+		log.Error("Crawler error", "error", err)
+		os.Exit(1)
 	}
 }
