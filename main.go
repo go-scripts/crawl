@@ -1,84 +1,22 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/briandowns/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/go-scripts/crawl/pkg/common"
 	"github.com/go-scripts/crawl/pkg/crawl"
-	"github.com/go-scripts/crawl/ui"
+	"github.com/go-scripts/crawl/pkg/ui"
 )
-
-// ExtractedContent holds the content extracted from HTML elements
-type ExtractedContent struct {
-	Text       string            `json:"text"`
-	HTML       string            `json:"html"`
-	Attributes map[string]string `json:"attributes"`
-}
-// Configuration holds the crawler configuration
-type Configuration struct {
-	StartURL       string
-	MaxDepth       int
-	Concurrency    int
-	UserAgent      string
-	OutputFile     string
-	Domain         string
-	Verbose        bool
-	ExecuteJS      bool
-	WaitTime       time.Duration
-	Timeout        time.Duration
-	Selectors      []string
-	AttributeNames []string
-	ExcludePath    []string
-	Script         string
-}
-
-// ScrapedData is defined in models.go
-
-// Crawler represents the web crawler
-type Crawler struct {
-	config        Configuration
-	visited       map[string]bool
-	queue         Queue
-	results       []ScrapedData
-	visitedMu     sync.Mutex
-	resultsMu     sync.Mutex
-	wg            sync.WaitGroup
-	browserCtx    context.Context
-	browserCancel context.CancelFunc
-	fileWriter    *FileWriter
-}
-
-// Queue represents the crawler's work queue
-type Queue struct {
-	spinners      []*spinner.Spinner
-	spinnerStatus []bool
-	spinnerURLs   []string
-}
-
-// FileWriter handles writing crawled data to files
-type FileWriter struct {
-	outputDir string
-}
-
-// NewFileWriter creates a new FileWriter instance
-func NewFileWriter(outputDir string) (*FileWriter, error) {
-	return &FileWriter{
-		outputDir: outputDir,
-	}, nil
-}
-
-// WriteURLData writes the scraped data for a URL to a file
-func (fw *FileWriter) WriteURLData(data ScrapedData) error {
-	// Placeholder for actual file writing implementation
-	return nil
-}
+// Use types from pkg/common package
+type ExtractedContent = common.ExtractedContent
+type Configuration = common.Configuration
+type ScrapedData = common.ScrapedData
+type FileWriter = common.FileWriter
 
 // CLI flags structure
 type CLIFlags struct {
@@ -95,7 +33,7 @@ type CLIFlags struct {
 type Model struct {
 	config  *Configuration
 	flags   CLIFlags
-	crawler *Crawler
+	crawler *crawl.Crawler
 	ready   bool
 	err     error
 	layout  *ui.Layout
@@ -285,17 +223,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		
-		// Convert ScrapedData to ui.ScrapedData
-		uiScrapedData := ui.ScrapedData{
-			URL:         msg.data.URL,
-			Title:       msg.data.Title,
-			Selectors:   msg.data.Selectors,
-			Links:       msg.data.Links,
-			Console:     msg.data.Console,
-			StatusCode:  msg.data.StatusCode,
-			ContentType: msg.data.ContentType,
-		}
-		m.layout.AddCrawlResult(uiScrapedData, msg.err)
+		// Since we're now using common.ScrapedData directly
+		m.layout.AddCrawlResult(msg.data, msg.err)
 		m.layout.AddProcessedURL(msg.data.URL)
 		m.updateStats()
 
@@ -337,10 +266,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Update the layout with the message
-	layoutModel, layoutCmd := m.layout.Update(msg)
-	if updatedLayout, ok := layoutModel.(*ui.Layout); ok {
-		m.layout = updatedLayout
-	}
+	var layoutCmd tea.Cmd
+	m.layout, layoutCmd = m.layout.Update(msg)
 	cmds = append(cmds, layoutCmd)
 
 	return m, tea.Batch(cmds...)
@@ -372,9 +299,9 @@ func loadConfig(path string) (*Configuration, error) {
 }
 
 // createCrawler creates a new crawler with the given configuration
-func createCrawler(config *Configuration) (*Crawler, error) {
+func createCrawler(config *Configuration) (*crawl.Crawler, error) {
 	// Create and return a new crawler with the provided configuration
-	return crawl.NewCrawler(*config)
+	return crawl.NewCrawler(config)
 }
 
 func main() {
