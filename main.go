@@ -1,46 +1,5 @@
 package main
 
-import "testing"
-
-func TestDecodeUnicodeEscape(t *testing.T) {
-    tests := []struct {
-        name     string
-        input    string
-        expected string
-    }{
-        {
-            name:     "unicode escape sequence",
-            input:    "\\u003e",
-            expected: ">",
-        },
-        {
-            name:     "multiple escapes",
-            input:    "\\u003c div \\u003e",
-            expected: "< div >",
-        },
-        {
-            name:     "invalid escape sequence",
-            input:    "\\u00invalid",
-            expected: "\\u00invalid",
-        },
-        {
-            name:     "normal text",
-            input:    "Hello World",
-            expected: "Hello World",
-        },
-    }
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            result := decodeUnicodeEscape(tt.input)
-            if result != tt.expected {
-                t.Errorf("decodeUnicodeEscape(%q) = %q, want %q", 
-                    tt.input, result, tt.expected)
-            }
-        })
-    }
-}
-
 import (
 	"context"
 	"encoding/json"
@@ -49,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,7 +26,8 @@ type ExtractedContent struct {
 
 type ExtractedScriptContent struct {
 	Script string      `json:"script,omitempty"`
-	Return interface{} `json:"return,omitempty"` // JavaScript return value. Non-string values are automatically JSON-serialized
+	Return interface{} `json:"return,omitempty"`
+	Error  error       `json:"-,omitempty"`
 }
 
 // ScrapedData represents the structure of the scraped content
@@ -288,15 +247,6 @@ func (c *Crawler) normalizeURL(baseURL, href string) (string, error) {
 	return base.ResolveReference(reference).String(), nil
 }
 
-// decodeUnicodeEscape attempts to decode Unicode escape sequences in the input string.
-// If decoding fails, it returns the original input unchanged.
-func decodeUnicodeEscape(input string) string {
-    if decoded, err := strconv.Unquote(`"` + input + `"`); err == nil {
-        return decoded
-    }
-    return input
-}
-
 // getAttributes extracts attributes from an element using JavaScript
 func getAttributesJS(attributeNames []string) string {
 	// if len(attributeNames) == 0 {
@@ -466,8 +416,12 @@ func (c *Crawler) scrape(targetURL string) {
 		var scriptResult interface{}
 		err := chromedp.Run(timeoutCtx, chromedp.Evaluate(c.config.Script, &scriptResult))
 		if err != nil {
+			extractedScriptContent = ExtractedScriptContent{
+				Script: c.config.Script,
+				Error:  err,
+			}
 			if c.config.Verbose {
-				log.Error("Script execution failed", "url", targetURL, "error", err)
+				log.Error("Script execution failed", "url", targetURL, "script", c.config.Script, "error", err)
 			}
 		} else {
 			extractedScriptContent = ExtractedScriptContent{
@@ -475,13 +429,8 @@ func (c *Crawler) scrape(targetURL string) {
 				Return: scriptResult,
 			}
 
-			// Attempt to decode if the result is a string
-			if strResult, ok := scriptResult.(string); ok {
-				extractedScriptContent.Return = decodeUnicodeEscape(strResult)
-			}
-
 			if c.config.Verbose {
-				log.Info("Script execution succeeded", "details", extractedScriptContent)
+				log.Info("Script execution succeeded", "url", targetURL, "details", extractedScriptContent)
 			}
 		}
 	}
