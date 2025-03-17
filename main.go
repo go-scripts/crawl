@@ -22,7 +22,11 @@ type ExtractedContent struct {
 	HTML       string            `json:"html,omitempty"`
 	Text       string            `json:"text,omitempty"`
 	Attributes map[string]string `json:"attributes,omitempty"`
-	Return     string            `json:"return,omitempty"`
+}
+
+type ExtractedScriptContent struct {
+	Script string      `json:"script,omitempty"`
+	Return interface{} `json:"return,omitempty"` // JavaScript return value. Non-string values are automatically JSON-serialized
 }
 
 // ScrapedData represents the structure of the scraped content
@@ -31,7 +35,7 @@ type ScrapedData struct {
 	Title     string                        `json:"title"`
 	Selectors map[string][]ExtractedContent `json:"selectors"`
 	Links     []string                      `json:"links"`
-	Console   ExtractedContent              `json:"console"`
+	Script    ExtractedScriptContent        `json:"script"`
 }
 
 // Configuration holds all the settings for the crawler
@@ -111,7 +115,6 @@ func (fw *FileWriter) WriteURLData(data ScrapedData) error {
 		return err
 	}
 
-	log.Info("Successfully wrote URL data", "url", data.URL, "file", fullPath)
 	return nil
 }
 
@@ -406,16 +409,23 @@ func (c *Crawler) scrape(targetURL string) {
 		}
 	}
 
-	var extractedConsole ExtractedContent
+	var extractedScriptContent ExtractedScriptContent
 	if c.config.Script != "" {
 		log.Debug("Executing custom script", "url", targetURL)
-		var nodesScriptJSON string
-		err := chromedp.Run(timeoutCtx, chromedp.Evaluate(c.config.Script, &nodesScriptJSON))
-		if err != nil && c.config.Verbose {
-			log.Error("Script execution failed", "url", targetURL, "error", err)
+		var scriptResult interface{}
+		err := chromedp.Run(timeoutCtx, chromedp.Evaluate(c.config.Script, &scriptResult))
+		if err != nil {
+			if c.config.Verbose {
+				log.Error("Script execution failed", "url", targetURL, "error", err)
+			}
 		} else {
-			extractedConsole = ExtractedContent{
-				Return: nodesScriptJSON,
+			extractedScriptContent = ExtractedScriptContent{
+				Script: c.config.Script,
+				Return: scriptResult,
+			}
+
+			if c.config.Verbose {
+				log.Info("Script execution succeeded", "details", extractedScriptContent)
 			}
 		}
 	}
@@ -460,7 +470,7 @@ func (c *Crawler) scrape(targetURL string) {
 		Title:     pageTitle,
 		Selectors: selectorResults,
 		Links:     filteredLinks,
-		Console:   extractedConsole,
+		Script:    extractedScriptContent,
 	}
 
 	// Write this data to its own file immediately
@@ -585,8 +595,10 @@ func main() {
 	attributesFlag := flag.String("attributes", "", "Attributes to extract (comma separated). If empty, extracts common attributes")
 	excludePathFlag := flag.String("exclude", "", "Exclude URLs containing these paths (comma separated)")
 	executeJS := flag.Bool("execute-js", false, "Execute JavaScript on the page")
-	script := flag.String("script", "", "Execute script JavaScript on the page")
-
+	script := flag.String("script", "", "JavaScript to execute on the page. Return values are processed as follows:\n"+
+		"  - String values are stored directly\n"+
+		"  - Non-string values (objects, arrays) are JSON-serialized\n"+
+		"  - Maximum recommended payload size is 2MB")
 	flag.Parse()
 
 	if *startURL == "" {
