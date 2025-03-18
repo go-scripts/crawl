@@ -39,6 +39,19 @@ type ScrapedData struct {
 	Script    ExtractedScriptContent        `json:"script"`
 }
 
+// AIConfig holds settings for AI integration
+type AIConfig struct {
+	Enabled         bool
+	IncludePaths    []string // Path include patterns
+	SystemPrompt    string
+	OutputPath      string
+	QueryTemplate   string
+	Temperature     float64
+	APIEndpoint     string
+	ReasoningEffort string
+	ContextSize     int
+}
+
 // Configuration holds all the settings for the crawler
 type Configuration struct {
 	StartURL       string
@@ -54,6 +67,7 @@ type Configuration struct {
 	ExecuteJS      bool
 	WaitTime       time.Duration
 	Script         string
+	AI             AIConfig
 }
 
 // Queue for URLs to be processed
@@ -65,6 +79,7 @@ type Queue struct {
 type FileWriter struct {
 	outputDir string
 	mu        sync.Mutex
+	crawler   *Crawler // Reference to the parent crawler for AI processing
 }
 
 func NewFileWriter(outputDir string) (*FileWriter, error) {
@@ -76,6 +91,7 @@ func NewFileWriter(outputDir string) (*FileWriter, error) {
 
 	return &FileWriter{
 		outputDir: outputDir,
+		crawler:   nil, // Will be set after crawler initialization
 	}, nil
 }
 
@@ -114,6 +130,16 @@ func (fw *FileWriter) WriteURLData(data ScrapedData) error {
 	if err := os.WriteFile(fullPath, jsonData, 0644); err != nil {
 		log.Error("Failed to write URL data to file", "url", data.URL, "file", fullPath, "error", err)
 		return err
+	}
+
+	// Process with AI if enabled
+	if fw.crawler != nil && fw.crawler.config.AI.Enabled && fw.crawler.aiProcessor != nil {
+		if err := fw.crawler.aiProcessor.ProcessJSONResult(data); err != nil {
+			log.Error("Failed to process URL data with AI", "url", data.URL, "error", err)
+			// Continue execution despite AI processing error
+		} else {
+			log.Info("Processed URL data with AI", "url", data.URL)
+		}
 	}
 
 	return nil
@@ -156,6 +182,7 @@ type Crawler struct {
 	browserCtx    context.Context
 	browserCancel context.CancelFunc
 	fileWriter    *FileWriter
+	aiProcessor   *AIProcessor
 }
 
 func NewCrawler(config Configuration) (*Crawler, error) {
@@ -183,14 +210,67 @@ func NewCrawler(config Configuration) (*Crawler, error) {
 		return nil, err
 	}
 
-	return &Crawler{
+	// The FileWriter will need a reference to the crawler for AI processing
+	// This will be set after the crawler is created
+
+	// Validate AI configuration if enabled
+	if config.AI.Enabled {
+		// Check if APIEndpoint and OutputPath are provided
+		if config.AI.APIEndpoint == "" {
+			return nil, fmt.Errorf("API endpoint is required when AI is enabled")
+		}
+		if config.AI.OutputPath == "" {
+			return nil, fmt.Errorf("output path is required when AI is enabled")
+		}
+
+		// Validate QueryTemplate contains the JSON_RESULT placeholder
+		if !strings.Contains(config.AI.QueryTemplate, "<JSON_RESULT>") {
+			return nil, fmt.Errorf("query template must contain the '<JSON_RESULT>' placeholder")
+		}
+
+		// Ensure ContextSize is within a reasonable range
+		if config.AI.ContextSize < 1 || config.AI.ContextSize > 32768 {
+			return nil, fmt.Errorf("context size must be between 1 and 32768")
+		}
+
+		// Validate ReasoningEffort
+		validEfforts := map[string]bool{
+			"auto":   true,
+			"none":   true,
+			"low":    true,
+			"medium": true,
+			"high":   true,
+		}
+		if !validEfforts[config.AI.ReasoningEffort] {
+			return nil, fmt.Errorf("reasoning effort must be one of: auto, none, low, medium, high")
+		}
+	}
+
+	// Initialize AI processor if enabled
+	var aiProcessor *AIProcessor
+	if config.AI.Enabled {
+		var err error
+		aiProcessor, err = NewAIProcessor(&config.AI)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize AI processor: %w", err)
+		}
+	}
+
+	// Create crawler instance
+	crawler := &Crawler{
 		config:        config,
 		visited:       make(map[string]bool),
 		queue:         Queue{},
 		browserCtx:    browserCtx,
 		browserCancel: browserCancel,
 		fileWriter:    fileWriter,
-	}, nil
+		aiProcessor:   aiProcessor,
+	}
+
+	// Set crawler reference in the file writer
+	fileWriter.crawler = crawler
+
+	return crawler, nil
 }
 
 func (c *Crawler) Close() {
@@ -623,6 +703,15 @@ func main() {
 	var executeJS bool
 	var script string
 
+	// AI-related flags
+	var aiEnabled bool
+	var aiSystemPrompt string
+	var aiOutputPath string
+	var aiQueryTemplate string
+	var aiTemperature float64
+	var aiAPIEndpoint string
+	var aiReasoningEffort string
+	var aiContextSize int
 	// Parse command line flags with both long and short forms
 	flag.StringVar(&startURL, "url", "", "Starting URL to crawl (required)")
 	flag.StringVar(&startURL, "u", "", "Starting URL to crawl (shorthand)")
@@ -660,6 +749,31 @@ func main() {
 
 	flag.StringVar(&script, "script", "", "JavaScript to execute on the page.")
 	flag.StringVar(&script, "x", "", "JavaScript to execute on the page. (shorthand)")
+
+	// AI-related flags
+	flag.BoolVar(&aiEnabled, "ai", false, "Enable AI processing of crawl results")
+	flag.BoolVar(&aiEnabled, "i", false, "Enable AI processing of crawl results (shorthand)")
+
+	flag.StringVar(&aiSystemPrompt, "system-prompt", "You are an assistant that analyzes web content.", "System prompt for AI processing")
+	flag.StringVar(&aiSystemPrompt, "p", "You are an assistant that analyzes web content.", "System prompt for AI processing (shorthand)")
+
+	flag.StringVar(&aiOutputPath, "ai-output", "", "Path to write AI processing results")
+	flag.StringVar(&aiOutputPath, "ao", "", "Path to write AI processing results (shorthand)")
+
+	flag.StringVar(&aiQueryTemplate, "query-template", "Analyze this JSON data: <JSON_RESULT>", "Template for AI query with <JSON_RESULT> placeholder")
+	flag.StringVar(&aiQueryTemplate, "qt", "Analyze this JSON data: <JSON_RESULT>", "Template for AI query with <JSON_RESULT> placeholder (shorthand)")
+
+	flag.Float64Var(&aiTemperature, "temperature", 0.7, "Temperature setting for AI processing")
+	flag.Float64Var(&aiTemperature, "tp", 0.7, "Temperature setting for AI processing (shorthand)")
+
+	flag.StringVar(&aiAPIEndpoint, "api-endpoint", "", "API endpoint for AI processing")
+	flag.StringVar(&aiAPIEndpoint, "api", "", "API endpoint for AI processing (shorthand)")
+
+	flag.StringVar(&aiReasoningEffort, "reasoning", "auto", "Reasoning effort setting (auto, none, low, medium, high)")
+	flag.StringVar(&aiReasoningEffort, "r", "auto", "Reasoning effort setting (auto, none, low, medium, high) (shorthand)")
+
+	flag.IntVar(&aiContextSize, "context-size", 8192, "Context size for AI processing")
+	flag.IntVar(&aiContextSize, "cs", 8192, "Context size for AI processing (shorthand)")
 	// Override default Usage function to show both long and short flag forms
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
@@ -676,6 +790,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --exclude, -e string\n\tExclude URLs containing these paths (comma separated)\n")
 		fmt.Fprintf(os.Stderr, "  --execute-js, -j\n\tExecute JavaScript on the page\n")
 		fmt.Fprintf(os.Stderr, "  --script, -x string\n\tJavaScript to execute on the page\n")
+		fmt.Fprintf(os.Stderr, "  --ai, -i\n\tEnable AI processing of crawl results\n")
+		fmt.Fprintf(os.Stderr, "  --system-prompt, -p string\n\tSystem prompt for AI processing (default \"You are an assistant that analyzes web content.\")\n")
+		fmt.Fprintf(os.Stderr, "  --ai-output, -ao string\n\tPath to write AI processing results\n")
+		fmt.Fprintf(os.Stderr, "  --query-template, -qt string\n\tTemplate for AI query with <JSON_RESULT> placeholder (default \"Analyze this JSON data: <JSON_RESULT>\")\n")
+		fmt.Fprintf(os.Stderr, "  --temperature, -tp float\n\tTemperature setting for AI processing (default 0.7)\n")
+		fmt.Fprintf(os.Stderr, "  --api-endpoint, -api string\n\tAPI endpoint for AI processing\n")
+		fmt.Fprintf(os.Stderr, "  --reasoning, -r string\n\tReasoning effort setting (auto, none, low, medium, high) (default \"auto\")\n")
+		fmt.Fprintf(os.Stderr, "  --context-size, -cs int\n\tContext size for AI processing (default 8192)\n")
 	}
 
 	flag.Parse()
@@ -735,6 +857,16 @@ func main() {
 		ExecuteJS:      executeJS,
 		WaitTime:       waitTime,
 		Script:         script,
+		AI: AIConfig{
+			Enabled:         aiEnabled,
+			SystemPrompt:    aiSystemPrompt,
+			OutputPath:      aiOutputPath,
+			QueryTemplate:   aiQueryTemplate,
+			Temperature:     aiTemperature,
+			APIEndpoint:     aiAPIEndpoint,
+			ReasoningEffort: aiReasoningEffort,
+			ContextSize:     aiContextSize,
+		},
 	}
 
 	crawler, err := NewCrawler(config)
