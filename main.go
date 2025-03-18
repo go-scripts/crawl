@@ -61,6 +61,7 @@ type Configuration struct {
 	Selectors      []string
 	AttributeNames []string
 	ExcludePath    []string
+	IncludePath    []string
 	MaxDepth       int
 	Concurrency    int
 	Timeout        time.Duration
@@ -311,6 +312,21 @@ func (c *Crawler) shouldExclude(urlStr string) bool {
 
 	path := u.Path
 
+	// Check includes first - if includes are specified, path must match at least one
+	if len(c.config.IncludePath) > 0 {
+		included := false
+		for _, include := range c.config.IncludePath {
+			if strings.Contains(path, include) {
+				included = true
+				break
+			}
+		}
+		if !included {
+			return true // Exclude if not included
+		}
+	}
+
+	// Then check excludes
 	for _, exclude := range c.config.ExcludePath {
 		if strings.Contains(path, exclude) {
 			return true
@@ -593,7 +609,8 @@ func (c *Crawler) Run() error {
 			"js_enabled", c.config.ExecuteJS,
 			"wait_time", c.config.WaitTime,
 			"attributes", c.config.AttributeNames,
-			"exclusions", c.config.ExcludePath)
+			"exclusions", c.config.ExcludePath,
+			"inclusions", c.config.IncludePath)
 	}
 
 	// Start with the first URL
@@ -700,6 +717,7 @@ func main() {
 	var selectorsFlag string
 	var attributesFlag string
 	var excludePathFlag string
+	var includePathFlag string
 	var executeJS bool
 	var script string
 
@@ -744,6 +762,9 @@ func main() {
 	flag.StringVar(&excludePathFlag, "exclude", "", "Exclude URLs containing these paths (comma separated)")
 	flag.StringVar(&excludePathFlag, "e", "", "Exclude URLs containing these paths (comma separated) (shorthand)")
 
+	flag.StringVar(&includePathFlag, "includes-path", "", "Include only URLs containing these paths (comma separated)")
+	flag.StringVar(&includePathFlag, "in", "", "Include only URLs containing these paths (comma separated) (shorthand)")
+
 	flag.BoolVar(&executeJS, "execute-js", false, "Execute JavaScript on the page")
 	flag.BoolVar(&executeJS, "j", false, "Execute JavaScript on the page (shorthand)")
 
@@ -787,10 +808,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  --timeout, -t duration\n\tHTTP request timeout (default 62s)\n")
 		fmt.Fprintf(os.Stderr, "  --selectors, -s string\n\tCSS selectors separated by comma\n")
 		fmt.Fprintf(os.Stderr, "  --attributes, -a string\n\tAttributes to extract (comma separated). If empty, extracts common attributes\n")
-		fmt.Fprintf(os.Stderr, "  --exclude, -e string\n\tExclude URLs containing these paths (comma separated)\n")
+	fmt.Fprintf(os.Stderr, "  --exclude, -e string\n\tExclude URLs containing these paths (comma separated)\n")
+	fmt.Fprintf(os.Stderr, "  --includes-path, -in string\n\tInclude only URLs containing these paths (comma separated)\n")
 		fmt.Fprintf(os.Stderr, "  --execute-js, -j\n\tExecute JavaScript on the page\n")
 		fmt.Fprintf(os.Stderr, "  --script, -x string\n\tJavaScript to execute on the page\n")
-		fmt.Fprintf(os.Stderr, "  --ai, -i\n\tEnable AI processing of crawl results\n")
+	fmt.Fprintf(os.Stderr, "  --ai, -i\n\tEnable AI processing of crawl results\n")
 		fmt.Fprintf(os.Stderr, "  --system-prompt, -p string\n\tSystem prompt for AI processing (default \"You are an assistant that analyzes web content.\")\n")
 		fmt.Fprintf(os.Stderr, "  --ai-output, -ao string\n\tPath to write AI processing results\n")
 		fmt.Fprintf(os.Stderr, "  --query-template, -qt string\n\tTemplate for AI query with <JSON_RESULT> placeholder (default \"Analyze this JSON data: <JSON_RESULT>\")\n")
@@ -834,6 +856,14 @@ func main() {
 		}
 	}
 
+	// Parse include paths
+	var includePaths []string
+	if includePathFlag != "" {
+		includePaths = strings.Split(includePathFlag, ",")
+		for i := range includePaths {
+			includePaths[i] = strings.TrimSpace(includePaths[i])
+		}
+	}
 	// Create output directory if it doesn't exist
 	outputDir := filepath.Dir(outputFile)
 	if outputDir != "." {
@@ -851,6 +881,7 @@ func main() {
 		Selectors:      selectors,
 		AttributeNames: attributeNames,
 		ExcludePath:    excludePaths,
+		IncludePath:    includePaths,
 		MaxDepth:       maxDepth,
 		Concurrency:    concurrency,
 		Timeout:        timeout,
