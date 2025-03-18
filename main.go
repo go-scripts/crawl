@@ -171,7 +171,14 @@ func NewCrawler(config Configuration) (*Crawler, error) {
 	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
 
 	// Setup file writer
-	fileWriter, err := NewFileWriter(filepath.Dir(config.OutputFile))
+	outputDir := filepath.Dir(config.OutputFile)
+
+	// If the output path ends with a slash, it's already a directory
+	if strings.HasSuffix(config.OutputFile, "/") {
+		outputDir = config.OutputFile
+	}
+
+	fileWriter, err := NewFileWriter(outputDir)
 	if err != nil {
 		return nil, err
 	}
@@ -514,7 +521,7 @@ func (c *Crawler) Run() error {
 
 	// Process queue until empty or max depth reached
 	depth := 0
-	for !c.queue.IsEmpty() && depth < c.config.MaxDepth {
+	for !c.queue.IsEmpty() && depth <= c.config.MaxDepth {
 		var levelURLs []string
 
 		// Get all URLs at the current depth
@@ -549,7 +556,21 @@ func (c *Crawler) Run() error {
 	}
 
 	// Write results to JSON file
-	file, err := os.Create(c.config.OutputFile)
+	outputPath := c.config.OutputFile
+
+	// Check if the output path ends with a slash, which indicates a directory
+	if strings.HasSuffix(outputPath, "/") {
+		// Ensure the directory exists (should already be created)
+		dirPath := outputPath
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
+			log.Error("error creating output directory", "err", err)
+			return err
+		}
+		// Append a default filename
+		outputPath = filepath.Join(dirPath, "output.json")
+	}
+
+	file, err := os.Create(outputPath)
 	if err != nil {
 		log.Error("error creating output file", "err", err)
 		return err
@@ -588,39 +609,95 @@ func main() {
 	log := log.New(os.Stderr)
 	log.SetStyles(styles)
 
-	// Parse command line flags
-	startURL := flag.String("url", "", "Starting URL to crawl (required)")
-	outputFile := flag.String("output", "scrape_results.json", "Output JSON file name")
-	verbose := flag.Bool("verbose", false, "Enable verbose output")
-	maxDepth := flag.Int("depth", 5, "Maximum crawl depth")
-	concurrency := flag.Int("concurrency", 3, "Maximum number of concurrent requests")
-	waitTime := flag.Duration("wait", 2*time.Second, "Time to wait after page load for JavaScript execution")
-	timeout := flag.Duration("timeout", *waitTime+60*time.Second, "HTTP request timeout")
-	selectorsFlag := flag.String("selectors", "h1,h2", "CSS selectors separated by comma")
-	attributesFlag := flag.String("attributes", "", "Attributes to extract (comma separated). If empty, extracts common attributes")
-	excludePathFlag := flag.String("exclude", "", "Exclude URLs containing these paths (comma separated)")
-	executeJS := flag.Bool("execute-js", false, "Execute JavaScript on the page")
-	script := flag.String("script", "", "JavaScript to execute on the page. Return values are processed as follows:\n"+
-		"  - String values are stored directly\n"+
-		"  - Non-string values (objects, arrays) are JSON-serialized\n"+
-		"  - Maximum recommended payload size is 2MB")
+	// Define variables to hold flag values
+	var startURL string
+	var outputFile string
+	var verbose bool
+	var maxDepth int
+	var concurrency int
+	var waitTime time.Duration
+	var timeout time.Duration
+	var selectorsFlag string
+	var attributesFlag string
+	var excludePathFlag string
+	var executeJS bool
+	var script string
+
+	// Parse command line flags with both long and short forms
+	flag.StringVar(&startURL, "url", "", "Starting URL to crawl (required)")
+	flag.StringVar(&startURL, "u", "", "Starting URL to crawl (shorthand)")
+
+	flag.StringVar(&outputFile, "output", "scrape_results.json", "Output JSON file name")
+	flag.StringVar(&outputFile, "o", "scrape_results.json", "Output JSON file name (shorthand)")
+
+	flag.BoolVar(&verbose, "verbose", false, "Enable verbose output")
+	flag.BoolVar(&verbose, "v", false, "Enable verbose output (shorthand)")
+
+	flag.IntVar(&maxDepth, "depth", 5, "Maximum crawl depth")
+	flag.IntVar(&maxDepth, "d", 5, "Maximum crawl depth (shorthand)")
+
+	flag.IntVar(&concurrency, "concurrency", 3, "Maximum number of concurrent requests")
+	flag.IntVar(&concurrency, "c", 3, "Maximum number of concurrent requests (shorthand)")
+
+	flag.DurationVar(&waitTime, "wait", 2*time.Second, "Time to wait after page load for JavaScript execution")
+	flag.DurationVar(&waitTime, "w", 2*time.Second, "Time to wait after page load for JavaScript execution (shorthand)")
+
+	defaultTimeout := 2*time.Second + 60*time.Second
+	flag.DurationVar(&timeout, "timeout", defaultTimeout, "HTTP request timeout")
+	flag.DurationVar(&timeout, "t", defaultTimeout, "HTTP request timeout (shorthand)")
+
+	flag.StringVar(&selectorsFlag, "selectors", "", "CSS selectors separated by comma")
+	flag.StringVar(&selectorsFlag, "s", "", "CSS selectors separated by comma (shorthand)")
+
+	flag.StringVar(&attributesFlag, "attributes", "", "Attributes to extract (comma separated). If empty, extracts common attributes")
+	flag.StringVar(&attributesFlag, "a", "", "Attributes to extract (comma separated). If empty, extracts common attributes (shorthand)")
+
+	flag.StringVar(&excludePathFlag, "exclude", "", "Exclude URLs containing these paths (comma separated)")
+	flag.StringVar(&excludePathFlag, "e", "", "Exclude URLs containing these paths (comma separated) (shorthand)")
+
+	flag.BoolVar(&executeJS, "execute-js", false, "Execute JavaScript on the page")
+	flag.BoolVar(&executeJS, "j", false, "Execute JavaScript on the page (shorthand)")
+
+	flag.StringVar(&script, "script", "", "JavaScript to execute on the page.")
+	flag.StringVar(&script, "x", "", "JavaScript to execute on the page. (shorthand)")
+	// Override default Usage function to show both long and short flag forms
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		fmt.Fprintf(os.Stderr, "  --url, -u string\n\tStarting URL to crawl (required)\n")
+		fmt.Fprintf(os.Stderr, "  --output, -o string\n\tOutput JSON file name (default \"scrape_results.json\")\n")
+		fmt.Fprintf(os.Stderr, "  --verbose, -v\n\tEnable verbose output\n")
+		fmt.Fprintf(os.Stderr, "  --depth, -d int\n\tMaximum crawl depth (default 5)\n")
+		fmt.Fprintf(os.Stderr, "  --concurrency, -c int\n\tMaximum number of concurrent requests (default 3)\n")
+		fmt.Fprintf(os.Stderr, "  --wait, -w duration\n\tTime to wait after page load for JavaScript execution (default 2s)\n")
+		fmt.Fprintf(os.Stderr, "  --timeout, -t duration\n\tHTTP request timeout (default 62s)\n")
+		fmt.Fprintf(os.Stderr, "  --selectors, -s string\n\tCSS selectors separated by comma\n")
+		fmt.Fprintf(os.Stderr, "  --attributes, -a string\n\tAttributes to extract (comma separated). If empty, extracts common attributes\n")
+		fmt.Fprintf(os.Stderr, "  --exclude, -e string\n\tExclude URLs containing these paths (comma separated)\n")
+		fmt.Fprintf(os.Stderr, "  --execute-js, -j\n\tExecute JavaScript on the page\n")
+		fmt.Fprintf(os.Stderr, "  --script, -x string\n\tJavaScript to execute on the page\n")
+	}
+
 	flag.Parse()
 
-	if *startURL == "" {
+	if startURL == "" {
 		flag.Usage()
 		os.Exit(1)
 	}
 
 	// Parse selectors and exclude paths
-	selectors := strings.Split(*selectorsFlag, ",")
-	for i := range selectors {
-		selectors[i] = strings.TrimSpace(selectors[i])
+	selectors := []string{}
+	if selectorsFlag != "" {
+		selectors = strings.Split(selectorsFlag, ",")
+		for i := range selectors {
+			selectors[i] = strings.TrimSpace(selectors[i])
+		}
 	}
 
 	// Parse attributes to extract
 	var attributeNames []string
-	if *attributesFlag != "" {
-		attributeNames = strings.Split(*attributesFlag, ",")
+	if attributesFlag != "" {
+		attributeNames = strings.Split(attributesFlag, ",")
 		for i := range attributeNames {
 			attributeNames[i] = strings.TrimSpace(attributeNames[i])
 		}
@@ -628,15 +705,15 @@ func main() {
 
 	// Parse exclude paths
 	var excludePaths []string
-	if *excludePathFlag != "" {
-		excludePaths = strings.Split(*excludePathFlag, ",")
+	if excludePathFlag != "" {
+		excludePaths = strings.Split(excludePathFlag, ",")
 		for i := range excludePaths {
 			excludePaths[i] = strings.TrimSpace(excludePaths[i])
 		}
 	}
 
 	// Create output directory if it doesn't exist
-	outputDir := filepath.Dir(*outputFile)
+	outputDir := filepath.Dir(outputFile)
 	if outputDir != "." {
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
 			log.Error("Failed to create output directory", "error", err)
@@ -646,18 +723,18 @@ func main() {
 
 	// Configure and run the crawler
 	config := Configuration{
-		StartURL:       *startURL,
-		OutputFile:     *outputFile,
-		Verbose:        *verbose,
+		StartURL:       startURL,
+		OutputFile:     outputFile,
+		Verbose:        verbose,
 		Selectors:      selectors,
 		AttributeNames: attributeNames,
 		ExcludePath:    excludePaths,
-		MaxDepth:       *maxDepth,
-		Concurrency:    *concurrency,
-		Timeout:        *timeout,
-		ExecuteJS:      *executeJS,
-		WaitTime:       *waitTime,
-		Script:         *script,
+		MaxDepth:       maxDepth,
+		Concurrency:    concurrency,
+		Timeout:        timeout,
+		ExecuteJS:      executeJS,
+		WaitTime:       waitTime,
+		Script:         script,
 	}
 
 	crawler, err := NewCrawler(config)
